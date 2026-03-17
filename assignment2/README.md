@@ -275,9 +275,15 @@ You can additionally implement any of these and include your results in a report
 - Run any of the polynomials on a TPU backend.
 - Run the polynomials from the zkSpeed or zkPHIRE papers.
 
-## 15. Submission Checklist
+## 15. Submission
 
-- 32-bit correctness passed on vars4, vars16, vars20 for base expressions.
-- 32-bit benchmarks collected on vars4, vars16, vars20 for base expressions.
-- a report on your results inside `report.pdf` (details TBD)
+Run:
 
+```bash
+bash scripts/make_submission.sh
+```
+
+This runs the required 32-bit correctness tests produces `code.zip`.
+Please upload `code.zip` to Brightspace.
+
+You should also submit a report in `report.pdf` (details TBD) that showcases 32-bit benchmark performance on vars4, vars16, vars20 for base expressions. Include optional/extra-credit optimizations and experiments you ran.
