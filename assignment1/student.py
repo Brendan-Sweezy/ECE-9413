@@ -13,6 +13,7 @@ x[n] is first multiplied by ψ^n.
 """
 
 import jax.numpy as jnp
+import jax
 
 
 # -----------------------------------------------------------------------------
@@ -21,17 +22,17 @@ import jax.numpy as jnp
 
 def mod_add(a, b, q):
     """Return (a + b) mod q, elementwise."""
-    raise NotImplementedError
+    return (a + b) % q
 
 
 def mod_sub(a, b, q):
     """Return (a - b) mod q, elementwise."""
-    raise NotImplementedError
+    return (a - b) % q  
 
 
 def mod_mul(a, b, q):
     """Return (a * b) mod q, elementwise."""
-    raise NotImplementedError
+    return (a * b) % q
 
 
 # -----------------------------------------------------------------------------
@@ -52,7 +53,49 @@ def ntt(x, *, q, psi_powers, twiddles):
     Returns:
         jnp.ndarray: NTT output, same shape as input
     """
-    raise NotImplementedError
+
+    batches, n = x.shape
+
+    # 1. Corrected Matrix Formula
+    def my_formula(i, j):
+        # Cast to int64 to prevent any overflow during index calculation
+        i = i.astype(jnp.int64)
+        j = j.astype(jnp.int64)
+        
+        # The true exponent: (2k + 1) * n
+        power_idx = ((2 * i + 1) * j) % (2 * n)
+        
+        # Handle the psi^N = -1 (mod q) property
+        val = jnp.where(
+            power_idx < n,
+            psi_powers[power_idx],
+            q - psi_powers[power_idx - n] # -x mod q is q - x
+        )
+        return val
+    
+    matrix = jnp.fromfunction(my_formula, (n, n), dtype=jnp.uint32)
+
+    # 2. Safe Modular Dot Product
+    def mod_dot_product(vec, row):
+        # Upcast to uint64 BEFORE multiplying so large numbers don't overflow
+        vec64 = vec.astype(jnp.uint64)
+        row64 = row.astype(jnp.uint64)
+        
+        products = (vec64 * row64) % q
+        
+        # Sum, mod q, and explicitly cast back to uint32 to pass the test
+        return (jnp.sum(products) % q).astype(jnp.uint32)
+
+    # 3. Apply via vmap
+    dot_vmap = jax.vmap(mod_dot_product, in_axes=(None, 0))
+    batch_vmap = jax.vmap(dot_vmap, in_axes=(0, None))
+
+    final_output = batch_vmap(x, matrix)
+    
+    return final_output
+
+
+    
 
 
 def prepare_tables(*, q, psi_powers, twiddles):
@@ -66,4 +109,3 @@ def prepare_tables(*, q, psi_powers, twiddles):
     Must return (psi_powers, twiddles) in the form expected by `ntt`.
     """
     return psi_powers, twiddles
-
