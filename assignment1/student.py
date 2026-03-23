@@ -1,19 +1,42 @@
 """
 Negacyclic Number Theoretic Transform (NTT) implementation.
 
-The negacyclic NTT computes polynomial evaluation at odd powers of a primitive
-root. Given coefficients x[0], x[1], ..., x[N-1], the output is:
+The negacyclic NTT computes
 
-    y[k] = Σ_{n=0}^{N-1} x[n] · ψ^{(2k+1)·n}  (mod q)
+    y[k] = Σ x[n] · ψ^((2k + 1)n) (mod q)
 
-where ψ is a primitive 2N-th root of unity (ψ^N ≡ -1 mod q).
+for a primitive 2N-th root ψ. We use the standard twist trick:
 
-This is equivalent to a cyclic NTT on "twisted" input, where each coefficient
-x[n] is first multiplied by ψ^n.
+1. Twist the input by ψ^n.
+2. Run a cyclic radix-2 NTT with ω = ψ².
+3. Convert the Cooley-Tukey bit-reversed output back to normal order.
 """
 
-import jax.numpy as jnp
+from __future__ import annotations
+
+import numpy as np
+
 import jax
+import jax.numpy as jnp
+
+jax.config.update("jax_enable_x64", True)
+
+
+def _as_u32(x):
+    return jnp.asarray(x, dtype=jnp.uint32)
+
+
+def _bit_reverse_indices(n: int) -> np.ndarray:
+    bits = n.bit_length() - 1
+    out = np.empty(n, dtype=np.int32)
+    for i in range(n):
+        x = i
+        rev = 0
+        for _ in range(bits):
+            rev = (rev << 1) | (x & 1)
+            x >>= 1
+        out[i] = rev
+    return out
 
 
 # -----------------------------------------------------------------------------
@@ -22,90 +45,70 @@ import jax
 
 def mod_add(a, b, q):
     """Return (a + b) mod q, elementwise."""
-    return (a + b) % q
+    q = jnp.asarray(q, dtype=jnp.uint32)
+    s = a + b
+    return jnp.where(s >= q, s - q, s).astype(jnp.uint32)
 
 
 def mod_sub(a, b, q):
     """Return (a - b) mod q, elementwise."""
-    return (a - b) % q  
+    q = jnp.asarray(q, dtype=jnp.uint32)
+    return jnp.where(a >= b, a - b, a + q - b).astype(jnp.uint32)
 
 
 def mod_mul(a, b, q):
     """Return (a * b) mod q, elementwise."""
-    return (a * b) % q
+    q64 = jnp.asarray(q, dtype=jnp.uint64)
+    prod = a.astype(jnp.uint64) * b.astype(jnp.uint64)
+    return jnp.remainder(prod, q64).astype(jnp.uint32)
 
 
 # -----------------------------------------------------------------------------
 # Core NTT
 # -----------------------------------------------------------------------------
 
-
 def ntt(x, *, q, psi_powers, twiddles):
     """
-    Compute the forward negacyclic NTT.
+    Compute the forward negacyclic NTT for a batch of inputs.
 
     Args:
         x: Input coefficients, shape (batch, N), values in [0, q)
-        q: Prime modulus satisfying (q - 1) % 2N == 0
-        psi_powers: Precomputed ψ^n table
-        twiddles: Precomputed twiddle table
+        q: Prime modulus satisfying (q - 1) % (2N) == 0
+        psi_powers: ψ^n table, shape (N,)
+        twiddles: Either the raw twiddle table or (twiddle_table, bitrev_indices)
 
     Returns:
-        jnp.ndarray: NTT output, same shape as input
+        jnp.ndarray: NTT output, same shape as input, dtype uint32
     """
+    if isinstance(twiddles, tuple):
+        twiddle_table, bitrev = twiddles
+    else:
+        twiddle_table = twiddles
+        bitrev = _as_u32(_bit_reverse_indices(x.shape[1]))
 
-    batches, n = x.shape
+    a = mod_mul(_as_u32(x), _as_u32(psi_powers), q)
+    batch, n = a.shape
 
-    # 1. Corrected Matrix Formula
-    def my_formula(i, j):
-        # Cast to int64 to prevent any overflow during index calculation
-        i = i.astype(jnp.int64)
-        j = j.astype(jnp.int64)
-        
-        # The true exponent: (2k + 1) * n
-        power_idx = ((2 * i + 1) * j) % (2 * n)
-        
-        # Handle the psi^N = -1 (mod q) property
-        val = jnp.where(
-            power_idx < n,
-            psi_powers[power_idx],
-            q - psi_powers[power_idx - n] # -x mod q is q - x
-        )
-        return val
-    
-    matrix = jnp.fromfunction(my_formula, (n, n), dtype=jnp.uint32)
+    span = 1
+    while span < n:
+        w = _as_u32(twiddle_table[span : 2 * span]).reshape(1, 1, span)
+        a = a.reshape(batch, n // (2 * span), 2 * span)
+        left = a[:, :, :span]
+        right = a[:, :, span:]
+        t = mod_mul(right, w, q)
+        a = jnp.concatenate((mod_add(left, t, q), mod_sub(left, t, q)), axis=2)
+        span <<= 1
 
-    # 2. Safe Modular Dot Product
-    def mod_dot_product(vec, row):
-        # Upcast to uint64 BEFORE multiplying so large numbers don't overflow
-        vec64 = vec.astype(jnp.uint64)
-        row64 = row.astype(jnp.uint64)
-        
-        products = (vec64 * row64) % q
-        
-        # Sum, mod q, and explicitly cast back to uint32 to pass the test
-        return (jnp.sum(products) % q).astype(jnp.uint32)
-
-    # 3. Apply via vmap
-    dot_vmap = jax.vmap(mod_dot_product, in_axes=(None, 0))
-    batch_vmap = jax.vmap(dot_vmap, in_axes=(0, None))
-
-    final_output = batch_vmap(x, matrix)
-    
-    return final_output
-
-
-    
+    return a.reshape(batch, n)[:, bitrev].astype(jnp.uint32)
 
 
 def prepare_tables(*, q, psi_powers, twiddles):
     """
     Optional one-time table preparation.
 
-    Override this if you want faster modular multiplication than JAX's "%".
-    For example, you can convert the provided tables into Montgomery form
-    (or any other domain) once here, then run `ntt` using your mod_mul.
-    This function runs before timing, so its cost is not counted as latency.
-    Must return (psi_powers, twiddles) in the form expected by `ntt`.
+    The benchmark excludes this cost, so we precompute the final bit-reversal
+    permutation once and reuse the provided stage twiddles directly.
     """
-    return psi_powers, twiddles
+    n = int(psi_powers.shape[0])
+    bitrev = jnp.asarray(_bit_reverse_indices(n), dtype=jnp.int32)
+    return _as_u32(psi_powers), (_as_u32(twiddles), bitrev)
