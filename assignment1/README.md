@@ -26,16 +26,14 @@ The NTT is the FFT, but for exact modular arithmetic instead of complex numbers.
 That makes it a core tool for fast polynomial multiplication, especially in
 cryptography. 
 
-The forward **negacyclic** NTT for polynomials modulo `x^N + 1`:
+The forward **negacyclic** NTT for polynomials modulo $x^N + 1$:
 
-```
-y[k] = sum_{n=0}^{N-1} x[n] * psi^{(2k+1)n}   (mod q)
-```
+$y[k] = \sum_{n=0}^{N-1} x[n] * \psi^{(2k+1)n}   \mod q$
 
 Where:
-* `N` is the transform size
-* `q` is a prime modulus where `(q - 1)` is divisible by `2N`
-* `psi` is a primitive `2N`-th root of unity modulo `q`, so `psi^N ≡ -1 (mod q)`
+* $N$ is the transform size
+* $q$ is a prime modulus where $(q - 1)$ is divisible by $2N$
+* $\psi$ is a primitive $2N$-th root of unity modulo $q$, so $\psi^N ≡ -1 (\mod q)$
 
 Your function must handle inputs shaped `(B, N)` (batch dimension `B`).
 `psi_powers` and `twiddles` are inputs to your implementation. The tests pass
